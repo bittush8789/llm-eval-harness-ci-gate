@@ -1,0 +1,164 @@
+name: AI Evaluation & Regression Testing CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Job 1: Static Analysis, Dataset Validation, and Offline Unit Tests
+  # ----------------------------------------------------------------------------
+  unit-tests-and-lint:
+    name: Unit Tests & Dataset Validation (Offline)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint code with Ruff
+        run: |
+          ruff check app/ tests/ scripts/
+
+      - name: Validate dataset schemas (Pydantic)
+        run: |
+          python -c "from app.evaluation.dataset_loader import DatasetLoader; loader = DatasetLoader(); cases = loader.load_version('v1'); print(f'Successfully validated {len(cases)} test cases in v1.')"
+
+      - name: Run offline unit & integration tests
+        env:
+          EVALUATION_OFFLINE_MODE: "true"
+          DATABASE_URL: "sqlite:///./test_eval.db"
+        run: |
+          pytest tests/unit/ tests/integration/ -v --tb=short
+
+  # ----------------------------------------------------------------------------
+  # Job 2: Docker Container Build Verification
+  # ----------------------------------------------------------------------------
+  docker-build:
+    name: Verify Docker Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: ai-eval-platform:ci-test
+
+  # ----------------------------------------------------------------------------
+  # Job 3: Ragas Evaluation, Regression Testing & Quality Gate Enforcement
+  # ----------------------------------------------------------------------------
+  evaluation-and-quality-gate:
+    name: Evaluation Suite & Quality Gate Enforcement
+    needs: [unit-tests-and-lint, docker-build]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ai_evaluation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run database migrations (Alembic)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_evaluation
+        run: |
+          alembic upgrade head
+
+      - name: Verify or Bootstrap Reference Baseline
+        id: check_baseline
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_evaluation
+          EVALUATION_OFFLINE_MODE: ${{ secrets.GOOGLE_API_KEY == '' && 'true' || 'false' }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          if [ ! -f "evaluation/baseline_lock.json" ]; then
+            echo "::notice ::No baseline_lock.json found. Initializing initial reference baseline..."
+            python -m scripts.initialize_baseline --dataset-version v1
+          else
+            echo "Found existing baseline lock file."
+          fi
+
+      - name: Execute Evaluation Runner & Enforce Quality Gates
+        id: run_eval
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_evaluation
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          EVALUATION_OFFLINE_MODE: ${{ secrets.GOOGLE_API_KEY == '' && 'true' || 'false' }}
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          python -m scripts.run_evaluation --dataset-version v1 --git-commit "${{ github.sha }}"
+
+      - name: Publish Markdown Regression Report to Job Summary
+        if: always()
+        run: |
+          LATEST_REPORT=$(ls -t reports/regression_report_*.md 2>/dev/null | head -n 1)
+          if [ -f "$LATEST_REPORT" ]; then
+            echo "Publishing $LATEST_REPORT to GITHUB_STEP_SUMMARY"
+            cat "$LATEST_REPORT" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No evaluation markdown report generated." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Evaluation Artifacts (Markdown & JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-regression-reports-${{ github.sha }}
+          path: |
+            reports/regression_report_*.md
+            reports/regression_report_*.json
+          retention-days: 30

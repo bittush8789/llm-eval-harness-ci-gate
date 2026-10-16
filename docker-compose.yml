@@ -1,0 +1,87 @@
+services:
+  # ----------------------------------------------------------------------------
+  # PostgreSQL Database Service
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai_eval_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_evaluation}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_evaluation}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - eval_network
+
+  # ----------------------------------------------------------------------------
+  # FastAPI Evaluation & Regression Service
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_eval_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ai_evaluation}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      APP_LLM_MODEL: ${APP_LLM_MODEL:-gemini-3.8-flash}
+      EVALUATOR_LLM_MODEL: ${EVALUATOR_LLM_MODEL:-gemini-3.8-pro}
+      EVALUATION_OFFLINE_MODE: ${EVALUATION_OFFLINE_MODE:-false}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./reports:/app/reports
+    networks:
+      - eval_network
+
+  # ----------------------------------------------------------------------------
+  # Standalone Evaluation Runner (On-Demand CLI Profile)
+  # Run via: docker compose run --rm evaluator python -m scripts.run_evaluation
+  # ----------------------------------------------------------------------------
+  evaluator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_eval_runner
+    profiles: ["cli"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-ai_evaluation}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      APP_LLM_MODEL: ${APP_LLM_MODEL:-gemini-3.8-flash}
+      EVALUATOR_LLM_MODEL: ${EVALUATOR_LLM_MODEL:-gemini-3.8-pro}
+      EVALUATION_OFFLINE_MODE: ${EVALUATION_OFFLINE_MODE:-false}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    volumes:
+      - ./reports:/app/reports
+    networks:
+      - eval_network
+    entrypoint: ["python", "-m", "scripts.run_evaluation"]
+
+volumes:
+  postgres_data:
+    name: ai_eval_postgres_data
+
+networks:
+  eval_network:
+    name: ai_eval_network

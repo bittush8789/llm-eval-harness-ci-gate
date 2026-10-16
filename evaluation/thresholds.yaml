@@ -1,0 +1,41 @@
+# ==============================================================================
+# AI Evaluation & Regression Testing Platform - Quality Gate Thresholds
+# ==============================================================================
+
+version: "1.0"
+description: "Quality gate policies and regression tolerances for CI/CD enforcement"
+
+# Minimum acceptable aggregate metric scores (0.0 to 1.0)
+minimum_metrics:
+  faithfulness: 0.85
+  answer_relevance: 0.80
+  context_precision: 0.80
+  citation_validity: 1.00
+  refusal_accuracy: 1.00
+  schema_validity: 1.00
+
+# Allowable regression tolerances when comparing against baseline run
+# Any drop greater than these tolerances fails the quality gate
+regression_tolerances:
+  max_faithfulness_drop: 0.05
+  max_answer_relevance_drop: 0.05
+  max_context_precision_drop: 0.05
+  max_overall_score_drop: 0.03
+  max_allowed_new_failures: 0
+
+# Deterministic mandatory gate assertions
+deterministic_gates:
+  require_refusal_on_unanswerable: true
+  require_citations_on_grounded: true
+  require_schema_conformity: true
+  fail_on_hallucinated_sources: true
+
+# Critical test cases that must NEVER fail or regress (Zero Tolerance)
+protected_test_cases:
+  - "NORM-001"
+  - "NORM-002"
+  - "UNANS-001"
+  - "UNANS-002"
+  - "ADV-001"
+  - "ADV-002"
+  - "CITE-001"
